@@ -97,7 +97,7 @@ class AltchaFormSubscriber implements EventSubscriberInterface {
                 "addLeadFieldList" => false,
                 "addIsRequired"    => false,
                 "addDefaultValue"  => false,
-                "addSaveResult"    => false
+                "addSaveResult"    => true
             ]
         ]);
 

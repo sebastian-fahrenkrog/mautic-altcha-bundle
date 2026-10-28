@@ -8,6 +8,7 @@ use AltchaOrg\Altcha\V1\Hasher\Algorithm;
 
 use AltchaOrg\Altcha\ServerSignature;
 
+use Psr\Cache\CacheItemPoolInterface;
 use Symfony\Component\Routing\Generator\UrlGeneratorInterface;
 
 use Mautic\PluginBundle\Helper\IntegrationHelper;
@@ -71,6 +72,12 @@ class AltchaClient {
 
     public const DEFAULT_SCRIPT_URL = "https://cdn.jsdelivr.net/npm/altcha@3/dist/main/altcha.i18n.js";
 
+    /** Cache key prefix for challenges that have already been accepted once (replay protection). */
+    private const USED_CHALLENGE_PREFIX = "altcha_used_";
+
+    /** Extra seconds a used challenge stays remembered beyond its own expiry, to absorb clock skew. */
+    private const USED_CHALLENGE_GRACE_SECONDS = 60;
+
     private ?string $hmacSecret = null;
 
     private ?string $sentinelDomain = null;
@@ -84,10 +91,12 @@ class AltchaClient {
      *
      * @param IntegrationHelper       $integrationHelper
      * @param UrlGeneratorInterface   $router
+     * @param CacheItemPoolInterface|null $cache Used to remember accepted challenges so a solved payload cannot be replayed. Optional only for backwards compatibility - without it, replay protection is disabled.
      */
     public function __construct(
         IntegrationHelper $integrationHelper,
-        private readonly UrlGeneratorInterface $router
+        private readonly UrlGeneratorInterface $router,
+        private readonly ?CacheItemPoolInterface $cache = null
     ) {
         $integrationObject = $integrationHelper->getIntegrationObject(AltchaIntegration::INTEGRATION_NAME);
 
@@ -294,7 +303,7 @@ class AltchaClient {
             try {
                 $result = ServerSignature::verifyServerSignature($payload, (string) $this->sentinelApiSecret);
 
-                return (bool) $result->verified;
+                return (bool) $result->verified && $this->consumeChallenge($payload);
             } catch(\Throwable $exception) {
                 return false;
             }
@@ -306,10 +315,72 @@ class AltchaClient {
         $altcha = new Altcha((string) $this->hmacSecret);
 
         try {
-            return $altcha->verifySolution($payload, true);
+            return $altcha->verifySolution($payload, true) && $this->consumeChallenge($payload);
         } catch(\Throwable $exception) {
             return false;
         }
+    }
+
+    /**
+     * <h2>consumeChallenge</h2>
+     *
+     * Replay protection. A signed challenge stays cryptographically valid until
+     * it expires (10 minutes by default), so without this check a bot could
+     * solve ONE puzzle in a real browser and then re-submit the identical
+     * payload hundreds of times from a script. The challenge string is
+     * remembered in the app cache until shortly after its own expiry; a second
+     * submission carrying the same challenge is rejected.
+     *
+     * Called only after the payload's signature and proof-of-work have been
+     * verified, so the cache can only ever be filled with genuine challenges.
+     *
+     * @param string $payload The base64 payload as posted by the widget.
+     *
+     * @return bool True the first time a challenge is seen, false on any later use.
+     */
+    private function consumeChallenge(string $payload): bool {
+        if(null === $this->cache)
+            return true;
+
+        $data = json_decode((string) base64_decode($payload, true), true);
+
+        if(!is_array($data) || empty($data["challenge"]) || !is_string($data["challenge"]))
+            return false;
+
+        $item = $this->cache->getItem(self::USED_CHALLENGE_PREFIX . hash("sha256", $data["challenge"]));
+
+        if($item->isHit())
+            return false;
+
+        $item->set(time());
+        $item->expiresAfter($this->remainingLifetime((string) ($data["salt"] ?? "")) + self::USED_CHALLENGE_GRACE_SECONDS);
+        $this->cache->save($item);
+
+        return true;
+    }
+
+    /**
+     * <h2>remainingLifetime</h2>
+     *
+     * Reads the "expires" unix timestamp ALTCHA appends to the salt
+     * (e.g. "abc123?expires=1700000000") and returns how many seconds the
+     * challenge is still valid for. Falls back to the default expiry when the
+     * salt carries no usable timestamp.
+     *
+     * @param string $salt
+     *
+     * @return int Seconds, never negative.
+     */
+    private function remainingLifetime(string $salt): int {
+        $query = (string) parse_url($salt, PHP_URL_QUERY);
+        parse_str($query, $params);
+
+        $expires = (int) ($params["expires"] ?? 0);
+
+        if($expires <= 0)
+            return self::DEFAULT_EXPIRE_SECONDS;
+
+        return max(0, $expires - time());
     }
 
 }

@@ -96,7 +96,8 @@ return [
 
                 "arguments" => [
                     "mautic.helper.integration",
-                    "router"
+                    "router",
+                    "cache.app"
                 ]
             ]
         ],

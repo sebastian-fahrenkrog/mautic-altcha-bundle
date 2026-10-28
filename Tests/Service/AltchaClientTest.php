@@ -6,6 +6,7 @@ use MauticPlugin\MauticAltchaBundle\Integration\AltchaIntegration;
 use MauticPlugin\MauticAltchaBundle\Service\AltchaClient;
 use Mautic\PluginBundle\Helper\IntegrationHelper;
 use Mautic\PluginBundle\Integration\AbstractIntegration;
+use Symfony\Component\Cache\Adapter\ArrayAdapter;
 use Symfony\Component\Routing\Generator\UrlGeneratorInterface;
 use PHPUnit\Framework\TestCase;
 
@@ -149,6 +150,49 @@ class AltchaClientTest extends TestCase {
     /**
      * @test
      */
+    public function testReplayedPayloadIsRejected(): void {
+        $client    = $this->createAltchaClient();
+        $challenge = $client->createChallenge(1000, 600);
+        $number    = $this->solveChallenge($challenge);
+        $this->assertNotNull($number);
+
+        $payload = base64_encode(json_encode([
+            "algorithm" => $challenge["algorithm"],
+            "challenge" => $challenge["challenge"],
+            "number"    => $number,
+            "salt"      => $challenge["salt"],
+            "signature" => $challenge["signature"],
+        ]));
+
+        $this->assertTrue($client->verify($payload), "first use of a solved payload must pass");
+        $this->assertFalse($client->verify($payload), "second use of the same payload must be rejected");
+        $this->assertFalse($client->verify($payload), "every later use must stay rejected");
+    }
+
+    /**
+     * @test
+     */
+    public function testReplayProtectionIsPerChallenge(): void {
+        $client = $this->createAltchaClient();
+
+        foreach ([1, 2] as $i) {
+            $challenge = $client->createChallenge(1000, 600);
+            $number    = $this->solveChallenge($challenge);
+            $payload   = base64_encode(json_encode([
+                "algorithm" => $challenge["algorithm"],
+                "challenge" => $challenge["challenge"],
+                "number"    => $number,
+                "salt"      => $challenge["salt"],
+                "signature" => $challenge["signature"],
+            ]));
+
+            $this->assertTrue($client->verify($payload), "a fresh challenge #{$i} must pass even after another one was consumed");
+        }
+    }
+
+    /**
+     * @test
+     */
     public function testVerifyReturnsFalseForEmptyPayload(): void {
         $this->assertFalse($this->createAltchaClient()->verify(""));
         $this->assertFalse($this->createAltchaClient()->verify("   "));
@@ -241,7 +285,7 @@ class AltchaClientTest extends TestCase {
             fn(string $route, array $params) => "/altcha/challenge?" . http_build_query($params)
         );
 
-        return new AltchaClient($integrationHelper, $router);
+        return new AltchaClient($integrationHelper, $router, new ArrayAdapter());
     }
 
     private function solveChallenge(array $challenge): ?int {
