@@ -171,6 +171,39 @@ Variables
         })();
         </script>
 
+        {% set hisScriptUrl = altcha_his_script_url() %}
+        {% if hisScriptUrl is not null %}
+        {# GateCHA mode: load the Human Interaction Signature collector and
+           copy its signals into a hidden field right before submission.
+           The collector itself hooks the "submit" event, but Mautic submits
+           forms programmatically (form.submit()), which fires no such event,
+           so the submit button click is hooked instead (capture phase, so it
+           runs before Mautic's own handler). #}
+        <script>
+        (function(){
+            if(!window.__gatechaHisLoaded){
+                window.__gatechaHisLoaded=true;
+                var h=document.createElement('script');
+                h.src={{ hisScriptUrl|json_encode|raw }};
+                h.defer=true;
+                document.head.appendChild(h);
+            }
+            if(window.__gatechaHisHooked) return;
+            window.__gatechaHisHooked=true;
+            document.addEventListener('click', function(ev){
+                var t=ev.target;
+                var btn=t && t.closest ? t.closest('button[type=submit],input[type=submit],.mauticform-button') : null;
+                if(!btn || !window.gatechaHIS) return;
+                var form=btn.closest('form');
+                if(!form) return;
+                var f=form.querySelector('input[name="gatecha_his_signals"]');
+                if(!f){ f=document.createElement('input'); f.type='hidden'; f.name='gatecha_his_signals'; form.appendChild(f); }
+                f.value=JSON.stringify(window.gatechaHIS.signals());
+            }, true);
+        })();
+        </script>
+        {% endif %}
+
         <div {% for attrName, attrValue in containerAttributes %}{{ attrName }}="{% if attrValue is iterable %}{{ attrValue|join(' ') }}{% else %}{{ attrValue }}{% endif %}"{% endfor %}>
             <div style="position: relative; top:25px; padding-bottom:25px">
                 <span class="mauticform-errormsg" style="display: none;"></span>

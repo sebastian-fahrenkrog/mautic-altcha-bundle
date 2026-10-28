@@ -10,6 +10,7 @@ use Symfony\Component\Form\Extension\Core\Type\ButtonType;
 use Symfony\Component\Form\Extension\Core\Type\TextType;
 use Symfony\Component\Form\Extension\Core\Type\PasswordType;
 use Symfony\Component\Form\Extension\Core\Type\UrlType;
+use Mautic\CoreBundle\Form\Type\YesNoButtonGroupType;
 
 /**
  * <h1>Class AltchaIntegration</h1>
@@ -99,9 +100,10 @@ class AltchaIntegration extends AbstractIntegration {
         $keys = $this->getKeys();
 
         $sentinelReady   = !empty($keys["sentinel_domain"]) && !empty($keys["sentinel_api_key"]) && !empty($keys["sentinel_api_secret"]);
+        $gatechaReady    = !empty($keys["gatecha_url"]) && !empty($keys["gatecha_api_key"]);
         $selfHostedReady = !empty($keys["hmac_secret"]);
 
-        return $sentinelReady || $selfHostedReady;
+        return $sentinelReady || $gatechaReady || $selfHostedReady;
     }
 
     /**
@@ -152,10 +154,14 @@ class AltchaIntegration extends AbstractIntegration {
         // ── Active mode badge ───────────────────────────────────────────────
         $keys            = $this->getKeys();
         $sentinelReady   = !empty($keys["sentinel_domain"]) && !empty($keys["sentinel_api_key"]) && !empty($keys["sentinel_api_secret"]);
+        $gatechaReady    = !empty($keys["gatecha_url"]) && !empty($keys["gatecha_api_key"]);
         $selfHostedReady = !empty($keys["hmac_secret"]);
 
         if($sentinelReady) {
             $badgeLabel = "✓ Active mode: ALTCHA Sentinel";
+            $badgeClass = "btn btn-success btn-sm";
+        } elseif($gatechaReady) {
+            $badgeLabel = "✓ Active mode: GateCHA";
             $badgeClass = "btn btn-success btn-sm";
         } elseif($selfHostedReady) {
             $badgeLabel = "✓ Active mode: Self-hosted";
@@ -253,6 +259,61 @@ class AltchaIntegration extends AbstractIntegration {
                 "class"       => "form-control",
                 "tooltip"     => "strings.altcha.settings.sentinel_api_secret.notice",
                 "placeholder" => "strings.altcha.settings.sentinel_api_secret.placeholder",
+            ],
+        ]);
+
+        // ── GateCHA section ─────────────────────────────────────────────────
+        $builder->add("_section_gatecha", ButtonType::class, [
+            "label" => "GateCHA (free, self-hosted ALTCHA-compatible server)",
+            "attr"  => [
+                "class"    => "btn btn-link btn-block text-left",
+                "disabled" => "disabled",
+                "style"    => "cursor:default;pointer-events:none;font-weight:bold;font-size:13px;border-bottom:2px solid #ddd;padding:0 0 6px 0;margin-bottom:10px;color:#333;margin-top:8px;",
+            ],
+        ]);
+
+        $builder->add("gatecha_url", UrlType::class, [
+            "label"      => "strings.altcha.settings.gatecha_url",
+            "required"   => false,
+            "data"       => $data["gatecha_url"] ?? "",
+            "label_attr" => ["class" => "control-label"],
+            "attr"       => [
+                "class"   => "form-control",
+                "tooltip" => "strings.altcha.settings.gatecha_url.notice",
+            ],
+        ]);
+
+        $builder->add("gatecha_api_key", TextType::class, [
+            "label"      => "strings.altcha.settings.gatecha_api_key",
+            "required"   => false,
+            "data"       => $data["gatecha_api_key"] ?? "",
+            "label_attr" => ["class" => "control-label"],
+            "attr"       => [
+                "class"       => "form-control",
+                "tooltip"     => "strings.altcha.settings.gatecha_api_key.notice",
+                "placeholder" => "gk_...",
+            ],
+        ]);
+
+        $builder->add("gatecha_internal_url", TextType::class, [
+            "label"      => "strings.altcha.settings.gatecha_internal_url",
+            "required"   => false,
+            "data"       => $data["gatecha_internal_url"] ?? "",
+            "label_attr" => ["class" => "control-label"],
+            "attr"       => [
+                "class"       => "form-control",
+                "tooltip"     => "strings.altcha.settings.gatecha_internal_url.notice",
+                "placeholder" => "http://127.0.0.1:8080",
+            ],
+        ]);
+
+        $builder->add("gatecha_require_his", YesNoButtonGroupType::class, [
+            "label"      => "strings.altcha.settings.gatecha_require_his",
+            "required"   => false,
+            "data"       => !empty($data["gatecha_require_his"]),
+            "label_attr" => ["class" => "control-label"],
+            "attr"       => [
+                "tooltip" => "strings.altcha.settings.gatecha_require_his.notice",
             ],
         ]);
 

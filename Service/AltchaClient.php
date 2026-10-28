@@ -8,6 +8,7 @@ use AltchaOrg\Altcha\V1\Hasher\Algorithm;
 
 use AltchaOrg\Altcha\ServerSignature;
 
+use GuzzleHttp\ClientInterface as HttpClientInterface;
 use Psr\Cache\CacheItemPoolInterface;
 use Symfony\Component\Routing\Generator\UrlGeneratorInterface;
 
@@ -84,6 +85,14 @@ class AltchaClient {
     private ?string $sentinelApiKey = null;
     private ?string $sentinelApiSecret = null;
 
+    /** GateCHA (https://gatecha.org): free, ALTCHA-compatible server. Public base URL the widget talks to. */
+    private ?string $gatechaUrl = null;
+    private ?string $gatechaApiKey = null;
+    /** Optional base URL Mautic uses for the server-side verify call (e.g. http://127.0.0.1:8080 when GateCHA runs next to Mautic). */
+    private ?string $gatechaInternalUrl = null;
+    /** When true, a submission without a usable Human Interaction Signature is rejected before GateCHA is even asked. */
+    private bool $gatechaRequireHis = false;
+
     private ?string $scriptUrl = null;
 
     /**
@@ -92,11 +101,13 @@ class AltchaClient {
      * @param IntegrationHelper       $integrationHelper
      * @param UrlGeneratorInterface   $router
      * @param CacheItemPoolInterface|null $cache Used to remember accepted challenges so a solved payload cannot be replayed. Optional only for backwards compatibility - without it, replay protection is disabled.
+     * @param HttpClientInterface|null    $httpClient Used for the GateCHA verify call only. Without it, GateCHA mode cannot verify and rejects everything.
      */
     public function __construct(
         IntegrationHelper $integrationHelper,
         private readonly UrlGeneratorInterface $router,
-        private readonly ?CacheItemPoolInterface $cache = null
+        private readonly ?CacheItemPoolInterface $cache = null,
+        private readonly ?HttpClientInterface $httpClient = null
     ) {
         $integrationObject = $integrationHelper->getIntegrationObject(AltchaIntegration::INTEGRATION_NAME);
 
@@ -108,6 +119,11 @@ class AltchaClient {
             $this->sentinelDomain    = $keys["sentinel_domain"] ?? null;
             $this->sentinelApiKey    = $keys["sentinel_api_key"] ?? null;
             $this->sentinelApiSecret = $keys["sentinel_api_secret"] ?? null;
+
+            $this->gatechaUrl         = !empty($keys["gatecha_url"]) ? rtrim((string) $keys["gatecha_url"], "/") : null;
+            $this->gatechaApiKey      = $keys["gatecha_api_key"] ?? null;
+            $this->gatechaInternalUrl = !empty($keys["gatecha_internal_url"]) ? rtrim((string) $keys["gatecha_internal_url"], "/") : null;
+            $this->gatechaRequireHis  = !empty($keys["gatecha_require_his"]);
 
             $this->scriptUrl = !empty($keys["script_url"]) ? (string) $keys["script_url"] : null;
         }
@@ -123,6 +139,15 @@ class AltchaClient {
     }
 
     /**
+     * <h2>usesGatecha</h2>
+     *
+     * @return bool True when a GateCHA base URL and API key are present (and Sentinel is not configured, which takes precedence).
+     */
+    public function usesGatecha(): bool {
+        return !$this->usesSentinel() && !empty($this->gatechaUrl) && !empty($this->gatechaApiKey);
+    }
+
+    /**
      * <h2>hasSelfHostedSecret</h2>
      *
      * @return bool
@@ -134,10 +159,33 @@ class AltchaClient {
     /**
      * <h2>isConfigured</h2>
      *
-     * @return bool True if either mode has everything it needs.
+     * @return bool True if any mode has everything it needs.
      */
     public function isConfigured(): bool {
-        return $this->usesSentinel() || $this->hasSelfHostedSecret();
+        return $this->usesSentinel() || $this->usesGatecha() || $this->hasSelfHostedSecret();
+    }
+
+    /**
+     * <h2>buildGatechaChallengeUrl</h2>
+     *
+     * @return string The GateCHA challenge endpoint the widget fetches from, including the public API key id.
+     */
+    public function buildGatechaChallengeUrl(): string {
+        return $this->gatechaUrl . "/api/v1/challenge?apiKey=" . rawurlencode((string) $this->gatechaApiKey);
+    }
+
+    /**
+     * <h2>getHisScriptUrl</h2>
+     *
+     * GateCHA ships a small collector (`/api/public/his.js`) that aggregates
+     * pointer, scroll, touch and typing signals into a Human Interaction
+     * Signature. The form template loads it in GateCHA mode so the verify
+     * call can carry those signals.
+     *
+     * @return string|null Null outside GateCHA mode.
+     */
+    public function getHisScriptUrl(): ?string {
+        return $this->usesGatecha() ? $this->gatechaUrl . "/api/public/his.js" : null;
     }
 
     /**
@@ -269,6 +317,9 @@ class AltchaClient {
         if($this->usesSentinel())
             return $this->buildSentinelChallengeUrl();
 
+        if($this->usesGatecha())
+            return $this->buildGatechaChallengeUrl();
+
         if(!$this->hasSelfHostedSecret())
             return null;
 
@@ -291,13 +342,24 @@ class AltchaClient {
      *   never has to make an outbound request just to validate a
      *   submission.
      *
-     * @param string $payload
+     * - GateCHA mode: the payload (plus the optional Human Interaction
+     *   Signature the collector wrote into the form) is POSTed to GateCHA's
+     *   `/api/v1/verify`. GateCHA checks signature, expiry, proof-of-work,
+     *   its own replay store and, if enforcement is enabled on the key, the
+     *   interaction score. This is the one mode with an outbound request -
+     *   to a server you run yourself.
+     *
+     * @param string      $payload
+     * @param string|null $hisSignalsJson JSON object from the hidden "gatecha_his_signals" field, GateCHA mode only.
      *
      * @return bool
      */
-    public function verify(string $payload): bool {
+    public function verify(string $payload, ?string $hisSignalsJson = null): bool {
         if("" === trim($payload))
             return false;
+
+        if($this->usesGatecha())
+            return $this->verifyWithGatecha($payload, $hisSignalsJson);
 
         if($this->usesSentinel()) {
             try {
@@ -316,6 +378,51 @@ class AltchaClient {
 
         try {
             return $altcha->verifySolution($payload, true) && $this->consumeChallenge($payload);
+        } catch(\Throwable $exception) {
+            return false;
+        }
+    }
+
+    /**
+     * <h2>verifyWithGatecha</h2>
+     *
+     * @param string      $payload
+     * @param string|null $hisSignalsJson
+     *
+     * @return bool True only when GateCHA answers {"ok": true}. Network errors, non-JSON answers and timeouts all count as rejected.
+     */
+    private function verifyWithGatecha(string $payload, ?string $hisSignalsJson): bool {
+        if(null === $this->httpClient)
+            return false;
+
+        $body = ["payload" => $payload];
+
+        if(null !== $hisSignalsJson && "" !== trim($hisSignalsJson)) {
+            $signals = json_decode($hisSignalsJson, true);
+
+            if(is_array($signals))
+                $body["his_signals"] = $signals;
+        }
+
+        // GateCHA only scores requests that carry signals; a script that
+        // skips the collector would otherwise pass untouched. Optionally
+        // close that gap by refusing submissions without signals.
+        if($this->gatechaRequireHis && !isset($body["his_signals"]))
+            return false;
+
+        $base = $this->gatechaInternalUrl ?? $this->gatechaUrl;
+        $url  = $base . "/api/v1/verify?apiKey=" . rawurlencode((string) $this->gatechaApiKey);
+
+        try {
+            $response = $this->httpClient->request("POST", $url, [
+                "json"        => $body,
+                "timeout"     => 5,
+                "http_errors" => false,
+            ]);
+
+            $data = json_decode((string) $response->getBody(), true);
+
+            return is_array($data) && true === ($data["ok"] ?? false);
         } catch(\Throwable $exception) {
             return false;
         }

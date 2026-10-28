@@ -47,7 +47,17 @@ class AltchaExtension extends AbstractExtension {
         return [
             new TwigFunction("altcha_challenge", [$this, "createChallenge"]),
             new TwigFunction("altcha_script_url", [$this, "getScriptUrl"]),
+            new TwigFunction("altcha_his_script_url", [$this, "getHisScriptUrl"]),
         ];
+    }
+
+    /**
+     * <h2>getHisScriptUrl</h2>
+     *
+     * @return string|null URL of GateCHA's interaction-signal collector, null outside GateCHA mode.
+     */
+    public function getHisScriptUrl(): ?string {
+        return $this->altchaClient->getHisScriptUrl();
     }
 
     /**

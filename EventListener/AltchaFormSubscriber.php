@@ -122,9 +122,11 @@ class AltchaFormSubscriber implements EventSubscriberInterface {
         if(!$this->isConfigured)
             return;
 
-        $payload = (string) $this->requestStack->getCurrentRequest()?->request->get("altcha", "");
+        $request    = $this->requestStack->getCurrentRequest();
+        $payload    = (string) $request?->request->get("altcha", "");
+        $hisSignals = $request?->request->get("gatecha_his_signals");
 
-        if($this->altchaClient->verify($payload))
+        if($this->altchaClient->verify($payload, is_string($hisSignals) ? $hisSignals : null))
             return;
 
         $event->failedValidation($this->translator === null ? "ALTCHA verification was not successful." : $this->translator->trans("strings.altcha.failure_message"));
